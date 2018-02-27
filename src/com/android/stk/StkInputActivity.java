@@ -187,6 +187,7 @@ public class StkInputActivity extends Activity implements View.OnClickListener,
             }
         }
 
+        requestWindowFeature(Window.FEATURE_NO_TITLE);
         // Set the layout for this activity.
         setContentView(R.layout.stk_input);
 
@@ -464,6 +465,8 @@ public class StkInputActivity extends Activity implements View.OnClickListener,
 
         if (mStkInput.icon != null) {
             ImageView imageView = (ImageView) findViewById(R.id.icon);
+            imageView.setContentDescription(StkAppService.TEXT_ICON_FROM_COMMAND + ": "
+                    + mStkInput.text);
             imageView.setImageBitmap(mStkInput.icon);
             imageView.setVisibility(View.VISIBLE);
         }
