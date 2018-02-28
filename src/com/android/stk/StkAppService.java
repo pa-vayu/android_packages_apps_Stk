@@ -1025,6 +1025,10 @@ public class StkAppService extends Service implements Runnable {
         case GET_CHANNEL_STATUS:
             waitForUsersResponse = false;
             launchEventMessage(slotId);
+            //Reset the mCurrentCmd to mMainCmd, to avoid wrong TR sent for
+            //SEND_SMS/SS/USSD, when user launches STK app next time and do
+            //a menu selection.
+            mStkContext[slotId].mCurrentCmd = mStkContext[slotId].mMainCmd;
             break;
         case LAUNCH_BROWSER:
             // The device setup process should not be interrupted by launching browser.
@@ -1935,6 +1939,8 @@ public class StkAppService extends Service implements Runnable {
                     .setSmallIcon(com.android.internal.R.drawable.stat_notify_sim_toolkit);
             notificationBuilder.setContentIntent(pendingIntent);
             notificationBuilder.setOngoing(true);
+            notificationBuilder.setStyle(new Notification.BigTextStyle(notificationBuilder)
+                    .bigText(msg.text));
             notificationBuilder.setOnlyAlertOnce(true);
             // Set text and icon for the status bar and notification body.
             if (mStkContext[slotId].mIdleModeTextCmd.hasIconLoadFailed() ||
