@@ -50,17 +50,21 @@ import android.os.Parcel;
 import android.os.PersistableBundle;
 import android.os.PowerManager;
 import android.os.RemoteException;
+import android.os.ServiceManager;
 import android.os.SystemProperties;
 import android.os.Vibrator;
 import android.provider.Settings;
 import android.support.v4.content.LocalBroadcastManager;
 import android.telephony.CarrierConfigManager;
+import android.telephony.SubscriptionManager;
 import android.telephony.TelephonyManager;
 import android.text.TextUtils;
 import android.view.Gravity;
+import android.view.IWindowManager;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.WindowManager;
+import android.view.WindowManagerPolicyConstants;
 import android.widget.ImageView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -93,6 +97,8 @@ import static com.android.internal.telephony.cat.CatCmdMessage.
                    SetupEventListConstants.IDLE_SCREEN_AVAILABLE_EVENT;
 import static com.android.internal.telephony.cat.CatCmdMessage.
                    SetupEventListConstants.LANGUAGE_SELECTION_EVENT;
+import static com.android.internal.telephony.cat.CatCmdMessage.
+                   SetupEventListConstants.USER_ACTIVITY_EVENT;
 
 /**
  * SIM toolkit application level service. Interacts with Telephopny messages,
@@ -124,6 +130,7 @@ public class StkAppService extends Service implements Runnable {
         protected int mOpCode = -1;
         private Activity mActivityInstance = null;
         private Activity mDialogInstance = null;
+        private Activity mImmediateDialogInstance = null;
         private int mSlotId = 0;
         private SetupEventListSettings mSetupEventListSettings = null;
         private boolean mClearSelectItem = false;
@@ -149,6 +156,15 @@ public class StkAppService extends Service implements Runnable {
                     mDialogInstance);
             return mDialogInstance;
         }
+        final synchronized void setImmediateDialogInstance(Activity act) {
+            CatLog.d(this, "setImmediateDialogInstance act : " + mSlotId + ", " + act);
+            callSetActivityInstMsg(OP_SET_IMMED_DAL_INST, mSlotId, act);
+        }
+        final synchronized Activity getImmediateDialogInstance() {
+            CatLog.d(this, "getImmediateDialogInstance act : " + mSlotId + ", " +
+                    mImmediateDialogInstance);
+            return mImmediateDialogInstance;
+        }
     }
 
     private volatile Looper mServiceLooper;
@@ -162,6 +178,7 @@ public class StkAppService extends Service implements Runnable {
     private IProcessObserver.Stub mProcessObserver = null;
     private TonePlayer mTonePlayer = null;
     private Vibrator mVibrator = null;
+    private BroadcastReceiver mUserActivityReceiver = null;
 
     // Used for setting FLAG_ACTIVITY_NO_USER_ACTION when
     // creating an intent.
@@ -205,6 +222,7 @@ public class StkAppService extends Service implements Runnable {
     static final int OP_LOCALE_CHANGED = 10;
     static final int OP_ALPHA_NOTIFY = 11;
     static final int OP_IDLE_SCREEN = 12;
+    static final int OP_SET_IMMED_DAL_INST = 13;
 
     //Invalid SetupEvent
     static final int INVALID_SETUP_EVENT = 0xFF;
@@ -217,6 +235,9 @@ public class StkAppService extends Service implements Runnable {
 
     // Message id to remove stop tone message from queue.
     private static final int STOP_TONE_WHAT = 100;
+
+    // Message id to send user activity event to card.
+    private static final int OP_USER_ACTIVITY = 20;
 
     // Response ids
     static final int RES_ID_MENU_SELECTION = 11;
@@ -381,6 +402,7 @@ public class StkAppService extends Service implements Runnable {
     @Override
     public void onDestroy() {
         CatLog.d(LOG_TAG, "onDestroy()");
+        unregisterUserActivityReceiver();
         unregisterProcessObserver();
         sInstance = null;
         waitForLooper();
@@ -625,10 +647,14 @@ public class StkAppService extends Service implements Runnable {
                 }
                 break;
             case OP_SET_DAL_INST:
-                Activity dal = new Activity();
+                Activity dal = (Activity) msg.obj;
                 CatLog.d(LOG_TAG, "Set dialog instance. " + dal);
-                dal = (Activity) msg.obj;
                 mStkContext[slotId].mDialogInstance = dal;
+                break;
+            case OP_SET_IMMED_DAL_INST:
+                Activity immedDal = (Activity) msg.obj;
+                CatLog.d(LOG_TAG, "Set dialog instance for immediate response. " + immedDal);
+                mStkContext[slotId].mImmediateDialogInstance = immedDal;
                 break;
             case OP_LOCALE_CHANGED:
                 CatLog.d(this, "Locale Changed");
@@ -652,6 +678,11 @@ public class StkAppService extends Service implements Runnable {
             case OP_STOP_TONE:
                 CatLog.d(this, "Stop tone");
                 handleStopTone(msg, slotId);
+                break;
+            case OP_USER_ACTIVITY:
+                for (int slot = PhoneConstants.SIM_ID_1; slot < mSimCount; slot++) {
+                    checkForSetupEvent(USER_ACTIVITY_EVENT, null, slot);
+                }
                 break;
             }
         }
@@ -1402,6 +1433,21 @@ public class StkAppService extends Service implements Runnable {
         }
     }
 
+    @Override
+    public void startActivity(Intent intent) {
+        int slotId = intent.getIntExtra(SLOT_ID, SubscriptionManager.INVALID_SIM_SLOT_INDEX);
+        // Close the dialog displayed for DISPLAY TEXT command with an immediate response object
+        // before new dialog is displayed.
+        if (SubscriptionManager.isValidSlotIndex(slotId)) {
+            Activity dialog = mStkContext[slotId].getImmediateDialogInstance();
+            if (dialog != null) {
+                CatLog.d(LOG_TAG, "finish dialog for immediate response.");
+                dialog.finish();
+            }
+        }
+        super.startActivity(intent);
+    }
+
     private void launchMenuActivity(Menu menu, int slotId) {
         Intent newIntent = new Intent(Intent.ACTION_VIEW);
         String targetActivity = STK_MENU_ACTIVITY_NAME;
@@ -1436,7 +1482,7 @@ public class StkAppService extends Service implements Runnable {
         newIntent.putExtra(SLOT_ID, slotId);
         newIntent.setData(uriData);
         newIntent.setFlags(intentFlags);
-        mContext.startActivity(newIntent);
+        startActivity(newIntent);
     }
 
     private void launchInputActivity(int slotId) {
@@ -1458,7 +1504,7 @@ public class StkAppService extends Service implements Runnable {
         if (input != null) {
             notifyUserIfNecessary(slotId, input.text);
         }
-        mContext.startActivity(newIntent);
+        startActivity(newIntent);
     }
 
     private void launchTextDialog(int slotId) {
@@ -1642,6 +1688,9 @@ public class StkAppService extends Service implements Runnable {
 
     private void unregisterEvent(int event, int slotId) {
         switch (event) {
+            case USER_ACTIVITY_EVENT:
+                unregisterUserActivityReceiver();
+                break;
             case IDLE_SCREEN_AVAILABLE_EVENT:
                 unregisterProcessObserver(AppInterface.CommandType.SET_UP_EVENT_LIST, slotId);
                 break;
@@ -1657,6 +1706,9 @@ public class StkAppService extends Service implements Runnable {
         }
         for (int event : mStkContext[slotId].mSetupEventListSettings.eventList) {
             switch (event) {
+                case USER_ACTIVITY_EVENT:
+                    registerUserActivityReceiver();
+                    break;
                 case IDLE_SCREEN_AVAILABLE_EVENT:
                     registerProcessObserver();
                     break;
@@ -1664,6 +1716,38 @@ public class StkAppService extends Service implements Runnable {
                 default:
                     break;
             }
+        }
+    }
+
+    private synchronized void registerUserActivityReceiver() {
+        if (mUserActivityReceiver == null) {
+            mUserActivityReceiver = new BroadcastReceiver() {
+                @Override public void onReceive(Context context, Intent intent) {
+                    if (WindowManagerPolicyConstants.ACTION_USER_ACTIVITY_NOTIFICATION.equals(
+                            intent.getAction())) {
+                        Message message = mServiceHandler.obtainMessage();
+                        message.arg1 = OP_USER_ACTIVITY;
+                        mServiceHandler.sendMessage(message);
+                        unregisterUserActivityReceiver();
+                    }
+                }
+            };
+            registerReceiver(mUserActivityReceiver, new IntentFilter(
+                    WindowManagerPolicyConstants.ACTION_USER_ACTIVITY_NOTIFICATION));
+            try {
+                IWindowManager wm = IWindowManager.Stub.asInterface(
+                        ServiceManager.getService(Context.WINDOW_SERVICE));
+                wm.requestUserActivityNotification();
+            } catch (RemoteException e) {
+                CatLog.e(this, "failed to init WindowManager:" + e);
+            }
+        }
+    }
+
+    private synchronized void unregisterUserActivityReceiver() {
+        if (mUserActivityReceiver != null) {
+            unregisterReceiver(mUserActivityReceiver);
+            mUserActivityReceiver = null;
         }
     }
 
@@ -1766,6 +1850,7 @@ public class StkAppService extends Service implements Runnable {
                 CatLog.d(this, " Event " + event + "exists in the EventList");
 
                 switch (event) {
+                    case USER_ACTIVITY_EVENT:
                     case IDLE_SCREEN_AVAILABLE_EVENT:
                         sendSetUpEventResponse(event, addedInfo, slotId);
                         removeSetUpEvent(event, slotId);
@@ -1803,6 +1888,11 @@ public class StkAppService extends Service implements Runnable {
                     mStkContext[slotId].mSetupEventListSettings.eventList[i] = INVALID_SETUP_EVENT;
 
                     switch (event) {
+                        case USER_ACTIVITY_EVENT:
+                            // The broadcast receiver can be unregistered
+                            // as the event has already been sent to the card.
+                            unregisterUserActivityReceiver();
+                            break;
                         case IDLE_SCREEN_AVAILABLE_EVENT:
                             // The process observer can be unregistered
                             // as the idle screen has already been available.
