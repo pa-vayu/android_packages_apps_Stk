@@ -176,6 +176,7 @@ public class StkAppService extends Service implements Runnable {
     private StkContext[] mStkContext = null;
     private int mSimCount = 0;
     private IProcessObserver.Stub mProcessObserver = null;
+    private BroadcastReceiver mLocaleChangeReceiver = null;
     private TonePlayer mTonePlayer = null;
     private Vibrator mVibrator = null;
     private BroadcastReceiver mUserActivityReceiver = null;
@@ -404,6 +405,7 @@ public class StkAppService extends Service implements Runnable {
         CatLog.d(LOG_TAG, "onDestroy()");
         unregisterUserActivityReceiver();
         unregisterProcessObserver();
+        unregisterLocaleChangeReceiver();
         sInstance = null;
         waitForLooper();
         mServiceLooper.quit();
@@ -818,12 +820,12 @@ public class StkAppService extends Service implements Runnable {
         switch (cmd.getCmdType()) {
         case SEND_DTMF:
         case SEND_SMS:
+        case REFRESH:
         case RUN_AT:
         case SEND_SS:
         case SEND_USSD:
         case SET_UP_IDLE_MODE_TEXT:
         case SET_UP_MENU:
-        case REFRESH:
         case CLOSE_CHANNEL:
         case RECEIVE_DATA:
         case SEND_DATA:
@@ -1353,29 +1355,27 @@ public class StkAppService extends Service implements Runnable {
     }
     /**
      * This method is used for cleaning up pending instances in stack.
+     * No terminal response will be sent for pending instances.
      */
     private void cleanUpInstanceStackBySlot(int slotId) {
         Activity activity = mStkContext[slotId].getPendingActivityInstance();
         Activity dialog = mStkContext[slotId].getPendingDialogInstance();
         CatLog.d(LOG_TAG, "cleanUpInstanceStackBySlot slotId: " + slotId);
-        if (mStkContext[slotId].mCurrentCmd == null) {
-            CatLog.d(LOG_TAG, "current cmd is null.");
-            return;
-        }
         if (activity != null) {
-            CatLog.d(LOG_TAG, "current cmd type: " +
-                    mStkContext[slotId].mCurrentCmd.getCmdType());
-            if (mStkContext[slotId].mCurrentCmd.getCmdType().value() ==
-                    AppInterface.CommandType.GET_INPUT.value() ||
-                    mStkContext[slotId].mCurrentCmd.getCmdType().value() ==
-                    AppInterface.CommandType.GET_INKEY.value()) {
-                mStkContext[slotId].mIsInputPending = true;
-            } else if (mStkContext[slotId].mCurrentCmd.getCmdType().value() ==
-                    AppInterface.CommandType.SET_UP_MENU.value() ||
-                    mStkContext[slotId].mCurrentCmd.getCmdType().value() ==
-                    AppInterface.CommandType.SELECT_ITEM.value()) {
-                mStkContext[slotId].mIsMenuPending = true;
-            } else {
+            if (mStkContext[slotId].mCurrentCmd != null) {
+                CatLog.d(LOG_TAG, "current cmd type: " +
+                        mStkContext[slotId].mCurrentCmd.getCmdType());
+                if (mStkContext[slotId].mCurrentCmd.getCmdType().value()
+                        == AppInterface.CommandType.GET_INPUT.value()
+                        || mStkContext[slotId].mCurrentCmd.getCmdType().value()
+                        == AppInterface.CommandType.GET_INKEY.value()) {
+                    mStkContext[slotId].mIsInputPending = true;
+                } else if (mStkContext[slotId].mCurrentCmd.getCmdType().value()
+                        == AppInterface.CommandType.SET_UP_MENU.value()
+                        || mStkContext[slotId].mCurrentCmd.getCmdType().value()
+                        == AppInterface.CommandType.SELECT_ITEM.value()) {
+                    mStkContext[slotId].mIsMenuPending = true;
+                }
             }
             CatLog.d(LOG_TAG, "finish pending activity.");
             activity.finish();
@@ -1680,6 +1680,18 @@ public class StkAppService extends Service implements Runnable {
     }
 
     private void unregisterEvent(int event, int slotId) {
+        for (int slot = PhoneConstants.SIM_ID_1; slot < mSimCount; slot++) {
+            if (slot != slotId) {
+                if (mStkContext[slot].mSetupEventListSettings != null) {
+                    if (findEvent(event, mStkContext[slot].mSetupEventListSettings.eventList)) {
+                        // The specified event shall never be canceled
+                        // if there is any other SIM card which requests the event.
+                        return;
+                    }
+                }
+            }
+        }
+
         switch (event) {
             case USER_ACTIVITY_EVENT:
                 unregisterUserActivityReceiver();
@@ -1688,6 +1700,8 @@ public class StkAppService extends Service implements Runnable {
                 unregisterProcessObserver(AppInterface.CommandType.SET_UP_EVENT_LIST, slotId);
                 break;
             case LANGUAGE_SELECTION_EVENT:
+                unregisterLocaleChangeReceiver();
+                break;
             default:
                 break;
         }
@@ -1706,6 +1720,8 @@ public class StkAppService extends Service implements Runnable {
                     registerProcessObserver();
                     break;
                 case LANGUAGE_SELECTION_EVENT:
+                    registerLocaleChangeReceiver();
+                    break;
                 default:
                     break;
             }
@@ -1804,6 +1820,28 @@ public class StkAppService extends Service implements Runnable {
             } catch (RemoteException e) {
                 CatLog.d(this, "Failed to unregister the process observer");
             }
+        }
+    }
+
+    private synchronized void registerLocaleChangeReceiver() {
+        if (mLocaleChangeReceiver == null) {
+            mLocaleChangeReceiver = new BroadcastReceiver() {
+                @Override public void onReceive(Context context, Intent intent) {
+                    if (Intent.ACTION_LOCALE_CHANGED.equals(intent.getAction())) {
+                        Message message = mServiceHandler.obtainMessage();
+                        message.arg1 = OP_LOCALE_CHANGED;
+                        mServiceHandler.sendMessage(message);
+                    }
+                }
+            };
+            registerReceiver(mLocaleChangeReceiver, new IntentFilter(Intent.ACTION_LOCALE_CHANGED));
+        }
+    }
+
+    private synchronized void unregisterLocaleChangeReceiver() {
+        if (mLocaleChangeReceiver != null) {
+            unregisterReceiver(mLocaleChangeReceiver);
+            mLocaleChangeReceiver = null;
         }
     }
 
